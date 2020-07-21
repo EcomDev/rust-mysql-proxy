@@ -47,7 +47,10 @@ pub (crate) enum Event {
         statement_id: u32,
         parameter_count: u32
     },
-    AffectedRows(u32),
+    Command {
+        affected_rows: u32,
+        last_insert_id: u32
+    },
     ResultSet(Vec<Column>),
     ResultRow(Vec<Value>),
     ResultEnd(),
