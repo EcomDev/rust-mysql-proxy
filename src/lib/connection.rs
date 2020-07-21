@@ -1,13 +1,12 @@
-use core::marker::Unpin;
+use crate::lib::messages::{Command, Event};
+use crate::lib::mysql::ConnectionState;
+
 use core::pin::Pin;
 use core::task::Poll;
 
-use tokio::prelude::*;
-use mysql_async::{Conn, QueryResult, BinaryProtocol, TextProtocol, Statement};
 
 use futures_core::{Future, Stream, ready};
 use tokio::stream::{self, StreamExt};
-use crate::lib::messages::{Command, Event};
 use futures_core::task::Context;
 use pin_project_lite::*;
 
@@ -16,27 +15,9 @@ pin_project!{
     {
         #[pin]
         commands: St,
-        statements: Vec<Statement>,
         state: ConnectionState<'a>,
         command_processor: Pr,
         current_future: Option<Pin<Box<Fut>>>
-    }
-}
-
-enum ConnectionState <'a>
-{
-    None,
-    Connected(Conn),
-    BinaryResult(Conn, QueryResult<'a, 'a, BinaryProtocol>),
-    TextResult(Conn, QueryResult<'a, 'a, TextProtocol>),
-    Statement(Conn, Statement),
-    Closed
-}
-
-impl <'a> Default for ConnectionState<'a>
-{
-    fn default() -> Self {
-        ConnectionState::None
     }
 }
 
@@ -48,7 +29,6 @@ impl <'a, St, Pr, Fut> Connection<'a, St, Pr, Fut>
     pub fn new(source: St, processor: Pr) -> Self {
         Connection {
             commands: source,
-            statements: vec![],
             state: ConnectionState::default(),
             command_processor: processor,
             current_future: None
@@ -112,16 +92,16 @@ mod tests
     #[tokio::test]
     async fn it_does_not_execute_any_commands_on_empty_stream()
     {
-        let mut connection = Connection::new(stream::empty(), dummy_processor);
+        let connection = Connection::new(stream::empty(), dummy_processor);
         assert_eq!(connection.collect::<Vec<_>>().await, vec![]);
     }
 
     #[tokio::test]
     async fn it_passes_state_and_commands_into_dummy_processor() {
-        let mut connection = Connection::new(
+        let connection = Connection::new(
             stream::iter(vec![
-                Command::Connect("tcp://something".into()),
-                Command::Prepare("SELECT ?".into()),
+                Command::connect("tcp://something"),
+                Command::prepare("SELECT ?"),
                 Command::Close()
             ]),
             dummy_processor
@@ -129,16 +109,16 @@ mod tests
 
         assert_eq!(
             connection.collect::<Vec<_>>().await, vec![
-                Event::Error(r#"Connect("tcp://something")"#.into()),
-                Event::Error(r#"Prepare("SELECT ?")"#.into()),
-                Event::Error(r#"Close"#.into())
+                Event::error(r#"Connect("tcp://something")"#),
+                Event::error(r#"Prepare("SELECT ?")"#),
+                Event::error(r#"Close"#)
             ]
         );
     }
 
     async fn modify_state(command: Command, state: ConnectionState<'_>)
         -> (Event, ConnectionState<'_>) {
-        (Event::Error(format!("{:?}", command)), match state {
+        (Event::error(format!("{:?}", command)), match state {
             ConnectionState::None => ConnectionState::Closed,
             ConnectionState::Closed => ConnectionState::None,
             _ => unreachable!()
