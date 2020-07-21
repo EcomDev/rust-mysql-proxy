@@ -28,37 +28,6 @@ pub struct Column {
     name: String
 }
 
-
-#[derive(Debug,PartialEq)]
-struct MySQLError {
-    message: String
-}
-
-#[derive(Debug,PartialEq)]
-struct PrepareStatement
-{
-    sql: String
-}
-
-#[derive(Debug,PartialEq)]
-struct PreparedStatement
-{
-    id: u32
-}
-
-#[derive(Debug,PartialEq)]
-struct Query {
-    sql: String
-}
-
-
-enum ExecuteStatement
-{
-    Statement(u32),
-    Parameter(Value),
-    End
-}
-
 #[derive(Debug,PartialEq)]
 pub enum Command {
     Connect(String),
