@@ -1,4 +1,4 @@
-use mysql_async::{Conn, QueryResult, BinaryProtocol, TextProtocol, Statement};
+use mysql_async::{Conn, QueryResult, BinaryProtocol, TextProtocol, Statement, Error as MySQLError};
 use std::collections::HashMap;
 use crate::lib::messages::{Event, Command};
 
@@ -45,6 +45,9 @@ pub (crate) async fn process_command(command: Command, state: ConnectionState<'_
         (Command::Connect(url), ConnectionState::None) => {
             connect_to_mysql_server(url).await
         },
+        (Command::Connect(url), ConnectionState::Closed) => {
+            connect_to_mysql_server(url).await
+        },
         (Command::Connect(_), state) => {
             (Event::error(ERROR_CONNECTION_ESTABLISHED), state)
         },
@@ -61,7 +64,7 @@ async fn connect_to_mysql_server<'a>(url: String) -> (Event, ConnectionState<'a>
                 ConnectionState::connected(MySQLConnection::new(connection))
             )
         },
-        _ => unreachable!()
+        Err(error) => (Event::error(format!("{}", error)), ConnectionState::default())
     }
 }
 
@@ -70,12 +73,19 @@ mod tests {
     use super::*;
     use futures_core::Future;
 
+    const SERVER_URL: &str = "mysql://root:tests@localhost/";
 
     #[tokio::test]
     async fn it_reports_version_of_mysql_server() {
         let (event, _) = connect_to_database().await;
 
-        assert!(matches!(event, Event::Connected{ version, process_id } if version == "5.7.30" && process_id > 0));
+        assert!(
+            matches!(
+                event,
+                Event::Connected{ version, process_id }
+                    if version == "5.7.30" && process_id > 0
+            )
+        );
     }
 
     #[tokio::test]
@@ -88,23 +98,52 @@ mod tests {
     #[tokio::test]
     async fn it_errors_out_if_connect_requested_for_already_connected_item() {
         let (_, state) = connect_to_database().await;
-        let (event, _) = process_command(
-            Command::connect("mysql://root:tests@localhost/"),
-            state
-        ).await;
+        let (event, _) = process_command(Command::connect(SERVER_URL), state).await;
+
+        assert_eq!(event, Event::error(ERROR_CONNECTION_ESTABLISHED))
+    }
+
+    #[tokio::test]
+    async fn it_errors_out_if_connect_url_is_malformed() {
+        let (event, _) = process_command(Command::connect("mysql//"), ConnectionState::default()).await;
 
         assert_eq!(
             event,
             Event::error(
-                ERROR_CONNECTION_ESTABLISHED
+                "URL error: `URL parse error: relative URL without a base'"
             )
         )
     }
 
-    fn connect_to_database() -> impl Future<Output=(Event, ConnectionState<'static>)> {
-        process_command(
-            Command::connect("mysql://root:tests@localhost/"),
-            ConnectionState::None
+    #[tokio::test]
+    async fn it_errors_out_if_connect_is_not_refused() {
+        let (event, _) = process_command(Command::connect("mysql://localhost:12345/"), ConnectionState::default()).await;
+
+        assert_eq!(
+            event,
+            Event::error(
+                "Input/output error: Input/output error: Connection refused (os error 111)"
+            )
         )
+    }
+
+    #[tokio::test]
+    async fn it_connects_previously_closed_connection() {
+        let (event, _) = process_command(
+            Command::connect(SERVER_URL),
+            ConnectionState::Closed
+        ).await;
+
+        assert!(
+            matches!(
+                event,
+                Event::Connected{ version, process_id }
+                    if version == "5.7.30" && process_id > 0
+            )
+        );
+    }
+
+    fn connect_to_database() -> impl Future<Output=(Event, ConnectionState<'static>)> {
+        process_command(Command::connect(SERVER_URL), ConnectionState::default())
     }
 }

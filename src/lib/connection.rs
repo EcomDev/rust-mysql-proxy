@@ -121,7 +121,7 @@ mod tests
         (Event::error(format!("{:?}", command)), match state {
             ConnectionState::None => ConnectionState::Closed,
             ConnectionState::Closed => ConnectionState::None,
-            _ => unreachable!()
+            _ => unimplemented!()
         })
     }
 
