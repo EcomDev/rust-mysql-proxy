@@ -135,4 +135,34 @@ mod tests
             ]
         );
     }
+
+    async fn modify_state(command: Command, state: ConnectionState<'_>)
+        -> (Event, ConnectionState<'_>) {
+        (Event::Error(format!("{:?}", command)), match state {
+            ConnectionState::None => ConnectionState::Closed,
+            ConnectionState::Closed => ConnectionState::None,
+            _ => unreachable!()
+        })
+    }
+
+    #[tokio::test]
+    async fn it_modifies_state_with_updated_one() {
+
+        let mut connection = Connection::new(
+            stream::iter(vec![
+                Command::Connect("tcp://something".into()),
+                Command::Close(),
+                Command::Connect("tcp://something".into()),
+            ]),
+            modify_state
+        );
+
+        connection.next().await;
+        connection.next().await;
+        connection.next().await;
+
+        assert!(matches!(
+            connection.state, ConnectionState::Closed
+        ));
+    }
 }
