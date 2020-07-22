@@ -2,7 +2,7 @@
 #[derive(Debug,PartialEq)]
 pub (crate) enum Value {
     Null,
-    Bytes(Vec<u32>),
+    Bytes(Vec<u8>),
     UnsignedInt(u64),
     Int(i64),
     Float(f32),
@@ -28,8 +28,18 @@ pub (crate) struct Column {
     name: String
 }
 
+impl Column {
+    pub (crate) fn new<T: AsRef<str>>(name: T, type_hint: TypeHint) -> Self {
+        Self {
+            type_hint,
+            name: String::from(name.as_ref())
+        }
+    }
+}
+
 #[derive(Debug,PartialEq)]
 pub (crate) enum Command {
+    Fetch,
     Connect(String),
     Query(String),
     Prepare(String),
@@ -64,9 +74,9 @@ pub (crate) enum Event {
     },
     ResultSet(Vec<Column>),
     ResultRow(Vec<Value>),
-    ResultEnd(),
+    ResultEnd,
     Error(String, ErrorType),
-    Closed()
+    Closed
 }
 
 impl Event {
@@ -90,6 +100,25 @@ impl Event {
             statement_id,
             parameter_count
         }
+    }
+
+    pub (super) fn command(last_insert_id: Option<u64>, affected_rows: u64) -> Self {
+        Self::Command {
+            last_insert_id,
+            affected_rows
+        }
+    }
+
+    pub (super) fn result_set(columns: Vec<Column>) -> Self {
+        Self::ResultSet(columns)
+    }
+
+    pub (super) fn result_row(row: Vec<Value>) -> Self {
+        Self::ResultRow(row)
+    }
+
+    pub (super) fn result_end() -> Self {
+        Self::ResultEnd
     }
 }
 

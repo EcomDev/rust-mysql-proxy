@@ -82,6 +82,7 @@ impl <'a, St, Pr, Fut> Stream for Connection<'a, St, Pr, Fut>
 mod tests
 {
     use super::*;
+    use crate::lib::messages::{Column, TypeHint, Value};
 
     async fn dummy_processor(command: Command, state: ConnectionState<'_>) -> (Event, ConnectionState<'_>) {
         match command {
@@ -102,7 +103,7 @@ mod tests
             stream::iter(vec![
                 Command::connect("tcp://something"),
                 Command::prepare("SELECT ?"),
-                Command::Close()
+                Command::close()
             ]),
             dummy_processor
         );
@@ -144,5 +145,33 @@ mod tests
         assert!(matches!(
             connection.state, ConnectionState::Closed
         ));
+    }
+
+    async fn fake_result_set_processor(command: Command, state: ConnectionState<'_>)
+        -> (Event, ConnectionState<'_>) {
+        unimplemented!()
+    }
+
+    #[tokio::test]
+    async fn it_automatically_fetches_result_set() {
+        let mut connection = Connection::new(
+            stream::iter(vec![
+                Command::query("SELECT 1 as one"),
+                Command::close(),
+            ]),
+            fake_result_set_processor
+        );
+
+        assert_eq!(
+            connection.collect::<Vec<_>>().await,
+            vec![
+                Event::result_set(
+                    vec![Column::new("one", TypeHint::Int)]
+                ),
+                Event::result_row(
+                    vec![Value::Int(1)]
+                )
+            ],
+        );
     }
 }
