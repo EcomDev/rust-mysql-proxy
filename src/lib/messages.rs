@@ -37,6 +37,17 @@ pub (crate) enum Command {
     Close()
 }
 
+#[derive(Debug, PartialEq)]
+pub (crate) enum ErrorType
+{
+    Driver,
+    Server,
+    Io,
+    Tls,
+    Url,
+    Other
+}
+
 #[derive(Debug,PartialEq)]
 pub (crate) enum Event {
     Connected {
@@ -54,7 +65,7 @@ pub (crate) enum Event {
     ResultSet(Vec<Column>),
     ResultRow(Vec<Value>),
     ResultEnd(),
-    Error(String),
+    Error(String, ErrorType),
     Closed()
 }
 
@@ -66,11 +77,15 @@ impl Event {
         }
     }
 
-    pub (super) fn error <T: AsRef<str>> (error_message: T) -> Self {
-        Self::Error(String::from(error_message.as_ref()))
+    pub (super) fn other_error<T: AsRef<str>> (error_message: T) -> Self {
+        Self::Error(String::from(error_message.as_ref()), ErrorType::Other)
     }
 
-    pub (super) fn prepared_statement <T: AsRef<str>> (statement_id: u32, parameter_count: u32) -> Self {
+    pub (super) fn error <T: AsRef<str>> (error_message: T, error_type: ErrorType) -> Self {
+        Self::Error(String::from(error_message.as_ref()), error_type)
+    }
+
+    pub (super) fn prepared_statement(statement_id: u32, parameter_count: u32) -> Self {
         Self::PreparedStatement {
             statement_id,
             parameter_count
@@ -92,7 +107,11 @@ impl Command
         Self::Prepare(String::from(query.as_ref()))
     }
 
-    pub (super) fn execute<T: AsRef<str>> (query: T) -> Self {
-        Self::Prepare(String::from(query.as_ref()))
+    pub (super) fn execute(statement_id: u32, parameters: Vec<Value>) -> Self {
+        Self::Execute(statement_id, parameters)
+    }
+
+    pub (super) fn close() -> Self {
+        Self::Close()
     }
 }

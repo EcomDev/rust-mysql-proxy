@@ -85,7 +85,7 @@ mod tests
 
     async fn dummy_processor(command: Command, state: ConnectionState<'_>) -> (Event, ConnectionState<'_>) {
         match command {
-            _ => (Event::Error(format!("{:?}", command)), state)
+            _ => (Event::other_error(format!("{:?}", command)), state)
         }
     }
 
@@ -109,16 +109,16 @@ mod tests
 
         assert_eq!(
             connection.collect::<Vec<_>>().await, vec![
-                Event::error(r#"Connect("tcp://something")"#),
-                Event::error(r#"Prepare("SELECT ?")"#),
-                Event::error(r#"Close"#)
+                Event::other_error(r#"Connect("tcp://something")"#),
+                Event::other_error(r#"Prepare("SELECT ?")"#),
+                Event::other_error(r#"Close"#)
             ]
         );
     }
 
     async fn modify_state(command: Command, state: ConnectionState<'_>)
         -> (Event, ConnectionState<'_>) {
-        (Event::error(format!("{:?}", command)), match state {
+        (Event::other_error(format!("{:?}", command)), match state {
             ConnectionState::None => ConnectionState::Closed,
             ConnectionState::Closed => ConnectionState::None,
             _ => unimplemented!()
