@@ -51,6 +51,11 @@ CREATE TABLE `product_text` (
     UNIQUE KEY (`product_id`, `attribute_id`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE `some_sequence` (
+    `sequence_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    PRIMARY KEY (`sequence_id`)
+);
+
 DELIMITER //
 
 CREATE PROCEDURE all_product_data(
@@ -100,3 +105,4 @@ VALUES (1, 4, 'Description 1'),
        (3, 4, 'Description 3'),
        (4, 4, 'Description 4')
 ;
+
