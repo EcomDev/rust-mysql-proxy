@@ -49,7 +49,7 @@ pub (crate) enum Event {
     },
     Command {
         affected_rows: u64,
-        last_insert_id: u64
+        last_insert_id: Option<u64>
     },
     ResultSet(Vec<Column>),
     ResultRow(Vec<Value>),
