@@ -1,10 +1,28 @@
 #!/bin/bash
 
+export MYSQL_PASSWORD=${MYSQL_PASSWORD:-tests}
+
+
 function compose() {
-  docker-compose -p async-mysql-proxy -f fixture/docker-compose.yml $@
+  docker-compose -p async-mysql-proxy -f fixture/docker-compose.yml "$@"
 }
 
-compose up -d
-sleep 10
+function start_mysql {
+   compose down >/dev/null 2>&1
+   compose up -d mysql >/dev/null 2>&1
+   last_status=1
+   while [ $last_status -gt 0 ]
+   do
+      compose exec mysql mysql -uroot -p$MYSQL_PASSWORD -e "show databases" >/dev/null 2>&1
+      last_status=$?
+   done
+}
 
-compose exec -T mysql mysql -u root -ptests < fixture/schema.sql
+if [[ "$1" == "stop" ]]
+then
+  compose down >/dev/null 2>&1
+  exit
+fi
+
+start_mysql
+compose exec -T mysql mysql -u root -ptests < fixture/schema.sql >/dev/null 2>&1
