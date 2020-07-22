@@ -48,8 +48,8 @@ pub (crate) enum Event {
         parameter_count: u32
     },
     Command {
-        affected_rows: u32,
-        last_insert_id: u32
+        affected_rows: u64,
+        last_insert_id: u64
     },
     ResultSet(Vec<Column>),
     ResultRow(Vec<Value>),
