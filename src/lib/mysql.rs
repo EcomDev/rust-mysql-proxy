@@ -101,13 +101,15 @@ pub (crate) async fn process_command(command: Command, state: ConnectionState<'_
 async fn prepare_statement<'a>(query: String, mut connection: MySQLConnection) -> (Event, ConnectionState<'a>) {
     let statement_result = connection.inner.prep(query).await;
     match statement_result {
-        Ok(statement) => (
-            Event::prepared_statement(
+        Ok(statement) => {
+            let event = Event::prepared_statement(
                 statement.id(),
                 statement.num_params().into()
-            ),
-            ConnectionState::Connected(connection)
-        ),
+            );
+
+            connection.statement_cache.insert(statement.id(), statement);
+            (event, ConnectionState::Connected(connection))
+        },
         Err(error) => (
             map_error(error),
             ConnectionState::Connected(connection)
@@ -314,7 +316,10 @@ mod process_command_tests {
 
     #[tokio::test]
     async fn it_adds_statement_to_cache() {
-        let (_, state) = process_command(Command::prepare("SELECT ?,?,?"), connect_to_database_and_get_state().await).await;
+        let (_, state) = process_command(
+            Command::prepare("SELECT ?,?,?"),
+            connect_to_database_and_get_state().await
+        ).await;
 
         assert!(matches!(state, ConnectionState::Connected(_)));
     }
@@ -333,6 +338,42 @@ mod process_command_tests {
                 ErrorType::Server
             )
         )
+    }
+
+    #[tokio::test]
+    async fn it_stores_prepared_statement_in_cache() {
+        let state = process_command(
+            Command::prepare("SELECT ?,?,?"),
+            connect_to_database_and_get_state().await
+        ).await.1;
+
+        let state = process_command(
+            Command::prepare("SELECT ? + ?"),
+            state
+        ).await.1;
+
+        let state = process_command(
+            Command::prepare("SELECT ? * ? * ?"),
+            state
+        ).await.1;
+
+        let connection = match state {
+            ConnectionState::Connected(connection) => connection,
+            _ => unreachable!()
+        };
+
+        let mut statement_ids = connection.statement_cache
+            .keys()
+            .collect::<Vec<&u32>>();
+
+        statement_ids.sort();
+
+        let statement_params: Vec<u16> = statement_ids
+                .iter()
+                .map(|key| connection.statement_cache.get(key).unwrap().num_params())
+                .collect();
+
+        assert_eq!(statement_params, vec![3, 2, 3])
     }
 
     fn connect_to_database() -> impl Future<Output=(Event, ConnectionState<'static>)> {
