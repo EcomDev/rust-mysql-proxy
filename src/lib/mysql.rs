@@ -2,12 +2,13 @@ use mysql_async::{
     Conn, QueryResult, BinaryProtocol,
     TextProtocol, Statement, Error as MySQLError,
     IoError as MySQLIoError,
+    Value as MySQLValue,
     prelude::*
 };
 
 use std::collections::HashMap;
 
-use crate::lib::messages::{Event, Command, ErrorType};
+use crate::lib::messages::{Event, Command, ErrorType, Value};
 use std::fmt::Display;
 
 const ERROR_CONNECTION_ESTABLISHED: &str = "Connection is already established, close previously open connection to processed.";
@@ -93,6 +94,9 @@ pub (crate) async fn process_command(command: Command, state: ConnectionState<'_
         },
         (Command::Prepare(query), ConnectionState::Connected(connection)) => {
             prepare_statement(query, connection).await
+        },
+        (Command::Execute(statement_id, params), ConnectionState::Connected(connection)) => {
+            execute_statement(statement_id, params, connection).await
         }
         _ => unimplemented!()
     }
@@ -115,6 +119,24 @@ async fn prepare_statement<'a>(query: String, mut connection: MySQLConnection) -
             ConnectionState::Connected(connection)
         )
     }
+}
+
+async fn execute_statement<'a>(
+    statement_id: u32,
+    params: Vec<Value>,
+    mut connection: MySQLConnection
+) -> (Event, ConnectionState<'a>) {
+    let statement = connection.statement_cache.get(&statement_id).unwrap();
+
+    let result = connection.inner.exec_iter(
+        statement,
+        vec![MySQLValue::NULL]
+    ).await.unwrap();
+
+    (
+        Event::command(result.last_insert_id(), result.affected_rows()),
+        ConnectionState::Connected(connection)
+    )
 }
 
 async fn connect_to_mysql_server<'a>(url: String) -> (Event, ConnectionState<'a>) {
@@ -210,8 +232,9 @@ mod error_mapper_tests {
 mod process_command_tests {
     use super::*;
     use futures_core::Future;
+    use crate::lib::messages::Value;
 
-    const SERVER_URL: &str = "mysql://root:tests@localhost/";
+    const SERVER_URL: &str = "mysql://root:tests@localhost/catalog";
 
     #[tokio::test]
     async fn it_reports_version_of_mysql_server() {
@@ -343,7 +366,7 @@ mod process_command_tests {
     #[tokio::test]
     async fn it_stores_prepared_statement_in_cache() {
         let state = process_command(
-            Command::prepare("SELECT ?,?,?"),
+            Command::prepare("SELECT ?, ?, ?"),
             connect_to_database_and_get_state().await
         ).await.1;
 
@@ -374,6 +397,102 @@ mod process_command_tests {
                 .collect();
 
         assert_eq!(statement_params, vec![3, 2, 3])
+    }
+
+    #[tokio::test]
+    async fn it_executes_prepared_command_statement_for_appending_new_record() {
+        let (statement_id, state) = prepare_statement(
+            "INSERT INTO some_sequence (sequence_id) VALUES (?)"
+        ).await;
+
+        let (last_insert_id, affected_rows, _) = execute_statement(
+            statement_id,
+            vec![Value::Null],
+            state
+        ).await;
+
+        assert!(last_insert_id.is_some());
+        assert_eq!(affected_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn it_executes_prepared_statement_where_there_is_no_last_insert_id() {
+        let (statement_id, state) = prepare_statement(
+            "SET @custom_variable=?"
+        ).await;
+
+        let (last_insert_id, affected_rows, _) = execute_statement(
+            statement_id,
+            vec![Value::Bytes(b"value!".to_vec())],
+            state
+        ).await;
+
+        assert_eq!(last_insert_id, None);
+        assert_eq!(affected_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn it_executes_prepared_statement_with_result() {
+        let (statement_id, state) = prepare_statement(
+            "SET @another_variable=?"
+        ).await;
+
+        let (_, _, state) = execute_statement(
+            statement_id, vec![Value::Bytes(b"value!".to_vec())], state
+        ).await;
+
+        let (statement_id, state) = prepare_statement(
+            "SELECT @another_variable as variable, ? + ? as sum, ? * ? as multiply"
+        ).await;
+
+        let (header_event, state) = process_command(
+            Command::execute(
+                statement_id,
+                vec![
+                    Value::UnsignedInt(2),
+                    Value::Int(2),
+                    Value::UnsignedInt(12),
+                    Value::Float(0.5),
+                ]
+            ),
+            state
+        ).await;
+    }
+
+    async fn execute_statement(
+        statement_id: u32,
+        params: Vec<Value>,
+        state: ConnectionState<'_>
+    ) -> (Option<u64>, u64, ConnectionState<'_>)
+    {
+        let (event, state) = process_command(
+            Command::execute(statement_id, params),
+            state
+        ).await;
+
+        let (last_insert_id, affected_rows) = match event {
+            Event::Command { last_insert_id, affected_rows } => (
+                last_insert_id,
+                affected_rows
+            ),
+            _ => unreachable!()
+        };
+
+        (last_insert_id, affected_rows, state)
+    }
+
+    async fn prepare_statement<T: AsRef<str>>(query: T) -> (u32, ConnectionState<'static>) {
+        let (event, state) = process_command(
+            Command::prepare(query),
+            connect_to_database_and_get_state().await
+        ).await;
+
+        let statement_id = match event {
+            Event::PreparedStatement { statement_id, parameter_count } => statement_id,
+            _ => unreachable!("It should succeed with statement")
+        };
+
+        (statement_id, state)
     }
 
     fn connect_to_database() -> impl Future<Output=(Event, ConnectionState<'static>)> {
