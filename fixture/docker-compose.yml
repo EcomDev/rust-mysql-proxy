@@ -6,3 +6,4 @@ services:
       MYSQL_ROOT_PASSWORD: $MYSQL_PASSWORD
     ports:
       - 3306:3306
+    command: --general_log=ON

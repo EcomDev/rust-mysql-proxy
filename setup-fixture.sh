@@ -24,5 +24,18 @@ then
   exit
 fi
 
+if [[ "$1" == "log" ]]
+then
+  compose logs -f mysql
+  exit
+fi
+
+if [[ "$1" == "exec" ]]
+then
+  shift
+  compose exec mysql "$@"
+  exit
+fi
+
 start_mysql
 compose exec -T mysql mysql -u root -ptests < fixture/schema.sql >/dev/null 2>&1
