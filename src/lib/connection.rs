@@ -11,20 +11,20 @@ use futures_core::task::Context;
 use pin_project_lite::*;
 
 pin_project!{
-    struct Connection <'a, St, Pr, Fut>
+    struct Connection <St, Pr, Fut>
     {
         #[pin]
         commands: St,
-        state: ConnectionState<'a>,
+        state: ConnectionState,
         command_processor: Pr,
         current_future: Option<Pin<Box<Fut>>>
     }
 }
 
-impl <'a, St, Pr, Fut> Connection<'a, St, Pr, Fut>
+impl < St, Pr, Fut> Connection< St, Pr, Fut>
     where St: Stream<Item=Command>,
-          Pr: Fn(Command, ConnectionState<'a>) -> Fut,
-          Fut: Future<Output=(Event, ConnectionState<'a>)>
+          Pr: Fn(Command, ConnectionState) -> Fut,
+          Fut: Future<Output=(Event, ConnectionState)>
 {
     pub fn new(source: St, processor: Pr) -> Self {
         Connection {
@@ -36,10 +36,10 @@ impl <'a, St, Pr, Fut> Connection<'a, St, Pr, Fut>
     }
 }
 
-impl <'a, St, Pr, Fut> Stream for Connection<'a, St, Pr, Fut>
+impl <St, Pr, Fut> Stream for Connection<St, Pr, Fut>
     where St: Stream<Item=Command>,
-          Pr: Fn(Command, ConnectionState<'a>) -> Fut,
-          Fut: Future<Output=(Event, ConnectionState<'a>)>
+          Pr: Fn(Command, ConnectionState) -> Fut,
+          Fut: Future<Output=(Event, ConnectionState)>
 {
     type Item = Event;
 
@@ -52,8 +52,23 @@ impl <'a, St, Pr, Fut> Stream for Connection<'a, St, Pr, Fut>
                     match future.as_mut().poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready((event, state)) => {
-                            *this.state = state;
-                            *this.current_future = None;
+                            let mut retry_fetch = |state: ConnectionState| {
+                                let processor = (this.command_processor)(
+                                    Command::fetch(),
+                                    state
+                                );
+
+                                *this.current_future = Some(Box::pin(processor));
+                            };
+
+                            match &event {
+                                Event::ResultSet(_) => retry_fetch(state),
+                                Event::ResultRow(_) => retry_fetch(state),
+                                _ => {
+                                    *this.state = state;
+                                    *this.current_future = None;
+                                }
+                            };
 
                             return Poll::Ready(Some(event))
                         },
@@ -64,7 +79,6 @@ impl <'a, St, Pr, Fut> Stream for Connection<'a, St, Pr, Fut>
                         None => return Poll::Ready(None),
                         Some(command) => command
                     };
-
 
                     let processor = (this.command_processor)(
                         command,
@@ -84,7 +98,7 @@ mod tests
     use super::*;
     use crate::lib::messages::{Column, TypeHint, Value};
 
-    async fn dummy_processor(command: Command, state: ConnectionState<'_>) -> (Event, ConnectionState<'_>) {
+    async fn dummy_processor(command: Command, state: ConnectionState) -> (Event, ConnectionState) {
         match command {
             _ => (Event::other_error(format!("{:?}", command)), state)
         }
@@ -117,8 +131,8 @@ mod tests
         );
     }
 
-    async fn modify_state(command: Command, state: ConnectionState<'_>)
-        -> (Event, ConnectionState<'_>) {
+    async fn modify_state(command: Command, state: ConnectionState)
+        -> (Event, ConnectionState) {
         (Event::other_error(format!("{:?}", command)), match state {
             ConnectionState::None => ConnectionState::Closed,
             ConnectionState::Closed => ConnectionState::None,
@@ -131,9 +145,9 @@ mod tests
 
         let mut connection = Connection::new(
             stream::iter(vec![
-                Command::Connect("tcp://something".into()),
-                Command::Close(),
-                Command::Connect("tcp://something".into()),
+                Command::connect("tcp://something"),
+                Command::close(),
+                Command::connect("tcp://something"),
             ]),
             modify_state
         );
@@ -147,14 +161,27 @@ mod tests
         ));
     }
 
-    async fn fake_result_set_processor(command: Command, state: ConnectionState<'_>)
-        -> (Event, ConnectionState<'_>) {
-        unimplemented!()
+    async fn fake_result_set_processor(command: Command, state: ConnectionState)
+        -> (Event, ConnectionState) {
+        match (command, state) {
+            (Command::Query(_), ConnectionState::None) => (
+                Event::ResultSet(vec![Column::new("one", TypeHint::Int)]),
+                ConnectionState::Closed
+            ),
+            (Command::Fetch, ConnectionState::Closed) => (
+                Event::ResultRow(vec![Value::Int(1)]),
+                ConnectionState::None
+            ),
+            (Command::Fetch, ConnectionState::None) => (
+                Event::ResultEnd, ConnectionState::None
+            ),
+            _ => (Event::closed(), ConnectionState::Closed)
+        }
     }
 
     #[tokio::test]
     async fn it_automatically_fetches_result_set() {
-        let mut connection = Connection::new(
+        let connection = Connection::new(
             stream::iter(vec![
                 Command::query("SELECT 1 as one"),
                 Command::close(),
@@ -170,8 +197,10 @@ mod tests
                 ),
                 Event::result_row(
                     vec![Value::Int(1)]
-                )
-            ],
+                ),
+                Event::result_end(),
+                Event::closed()
+            ]
         );
     }
 }

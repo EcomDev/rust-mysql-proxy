@@ -7,13 +7,74 @@ pub (crate) enum Value {
     Int(i64),
     Float(f32),
     Double(f64),
-    DateTime(u16, u8, u8, u8, u8, u8, u32),
-    DateInterval(bool, u32, u8, u8, u8, u32)
+    DateTime {
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        millisecond: u32
+    },
+    DateInterval {
+        negative: bool,
+        day: u32,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        millisecond: u32
+    }
+}
+
+impl From<&str> for Value
+{
+    fn from(value: &str) -> Self {
+        Self::Bytes(value.as_bytes().to_vec())
+    }
+}
+
+impl Value {
+    pub (crate) fn null() -> Self {
+        Value::Null
+    }
+
+    pub (crate) fn uint(value: u64) -> Self {
+        Value::UnsignedInt(value)
+    }
+
+    pub (crate) fn int(value: i64) -> Self {
+        Value::Int(value)
+    }
+
+    pub (crate) fn float(value: f32) -> Self {
+        Value::Float(value)
+    }
+
+    pub (crate) fn double(value: f64) -> Self {
+        Value::Double(value)
+    }
+
+    pub (crate) fn datetime(
+        year: u16, month: u8, day: u8,
+        hour: u8, minute: u8, second: u8, millisecond: u32
+    ) -> Self {
+        Self::DateTime { year, month, day, hour, minute, second, millisecond }
+    }
+
+    pub (crate) fn date_interval(
+        negative: bool, day: u32, hour: u8, minute: u8, second: u8, millisecond: u32
+    ) -> Self {
+        Self::DateInterval { negative, day, hour, minute, second, millisecond }
+    }
+
+    pub (crate) fn bytes(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
 }
 
 #[derive(Debug,PartialEq)]
 pub (crate) enum TypeHint {
-    UnsignedInt,
+    Null,
     Bytes,
     Int,
     Float,
@@ -44,7 +105,7 @@ pub (crate) enum Command {
     Query(String),
     Prepare(String),
     Execute(u32, Vec<Value>),
-    Close()
+    Close
 }
 
 #[derive(Debug, PartialEq)]
@@ -120,6 +181,10 @@ impl Event {
     pub (super) fn result_end() -> Self {
         Self::ResultEnd
     }
+
+    pub (super) fn closed() -> Self {
+        Self::Closed
+    }
 }
 
 impl Command
@@ -140,7 +205,11 @@ impl Command
         Self::Execute(statement_id, parameters)
     }
 
+    pub (super) fn fetch() -> Self {
+        Self::Fetch
+    }
+
     pub (super) fn close() -> Self {
-        Self::Close()
+        Self::Close
     }
 }
