@@ -50,7 +50,7 @@ pub (crate) struct MySQLConnection {
     current_result: Option<MySQLResult>
 }
 
-impl <'a> MySQLConnection {
+impl MySQLConnection {
     fn new(connection: Conn) -> Self {
         MySQLConnection {
             inner: connection,
