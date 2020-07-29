@@ -6,7 +6,7 @@ use core::task::Poll;
 
 
 use futures_core::{Future, Stream, ready};
-use tokio::stream::{self, StreamExt};
+
 use futures_core::task::Context;
 use pin_project_lite::*;
 
