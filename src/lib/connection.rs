@@ -7,7 +7,7 @@ use core::task::Poll;
 use futures_core::{ready, Future, Stream};
 
 use futures_core::task::Context;
-use pin_project_lite::*;
+use pin_project_lite::pin_project;
 
 pin_project! {
     struct Connection <St, Pr, Fut>

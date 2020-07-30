@@ -1,44 +1,19 @@
-#[deny(unused_imports)]
-use mysql_async::{
-    prelude::*, BinaryProtocol, Column as MySQLColumn, Conn, Error as MySQLError,
-    IoError as MySQLIoError, QueryResult, Row, Statement, TextProtocol, Value as MySQLValue,
-};
+use mysql_async::{prelude::*, BinaryProtocol, Conn, QueryResult, Row, Statement, TextProtocol};
 
 use std::collections::HashMap;
 
+use super::errors::map_error;
+use super::value_mapper::map_columns;
+use super::value_mapper::map_mysql_values_to_values;
+use super::value_mapper::map_values_to_mysql_values;
 use crate::lib::messages::{Column, Command, ErrorType, Event, TypeHint, Value};
-use mysql_async::consts::ColumnType;
-use std::fmt::Display;
+
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 const ERROR_CONNECTION_ESTABLISHED: &str =
     "Connection is already established, close previously open connection to processed.";
 
-fn error_to_string(error: impl Display) -> String {
-    format!("{}", error)
-}
-
-fn map_error(error: MySQLError) -> Event {
-    match error {
-        MySQLError::Server(server_error) => {
-            Event::error(error_to_string(server_error), ErrorType::Server)
-        }
-        MySQLError::Io(MySQLIoError::Io(io_error)) => {
-            Event::error(error_to_string(io_error), ErrorType::Io)
-        }
-        MySQLError::Other(value) => Event::other_error(error_to_string(value)),
-        MySQLError::Driver(driver_error) => {
-            Event::error(error_to_string(driver_error), ErrorType::Driver)
-        }
-        MySQLError::Url(url_error) => Event::error(error_to_string(url_error), ErrorType::Url),
-        MySQLError::Io(MySQLIoError::Tls(tls_error)) => {
-            Event::error(error_to_string(tls_error), ErrorType::Tls)
-        }
-    }
-}
-
-pub(crate) struct MySQLConnection {
+pub(in crate::lib) struct MySQLConnection {
     inner: Conn,
     statement_cache: HashMap<u32, Statement>,
     current_result: Option<MySQLResult>,
@@ -153,7 +128,7 @@ impl MySQLConnection {
     }
 }
 
-pub(crate) enum MySQLResult {
+pub(in crate::lib) enum MySQLResult {
     BinaryResult(MySQLQueryResult<BinaryProtocol>),
     TextResult(MySQLQueryResult<TextProtocol>),
 }
@@ -195,7 +170,7 @@ impl MySQLResult {
     }
 }
 
-pub(crate) struct MySQLQueryResult<Proto>
+pub(in crate::lib) struct MySQLQueryResult<Proto>
 where
     Proto: Protocol,
 {
@@ -233,13 +208,13 @@ where
     }
 }
 
-pub(crate) enum ConnectionState {
+pub(in crate::lib) enum ConnectionState {
     None,
     Connected(MySQLConnection),
     Closed,
 }
 
-impl<'a> ConnectionState {
+impl ConnectionState {
     fn connected(connection: MySQLConnection) -> Self {
         Self::Connected(connection)
     }
@@ -252,13 +227,13 @@ impl<'a> ConnectionState {
     }
 }
 
-impl<'a> Default for ConnectionState {
+impl Default for ConnectionState {
     fn default() -> Self {
         ConnectionState::None
     }
 }
 
-pub(crate) async fn process_command(
+pub(in crate::lib) async fn process_command(
     command: Command,
     state: ConnectionState,
 ) -> (Event, ConnectionState) {
@@ -331,275 +306,6 @@ async fn connect_to_mysql_server(url: String) -> (Event, ConnectionState) {
             )
         }
         Err(error) => (map_error(error), ConnectionState::default()),
-    }
-}
-
-fn map_values_to_mysql_values(values: Vec<Value>) -> Vec<MySQLValue> {
-    values.into_iter().map(|value| value.into()).collect()
-}
-
-fn map_mysql_values_to_values(values: Vec<MySQLValue>) -> Vec<Value> {
-    values.into_iter().map(|value| value.into()).collect()
-}
-
-fn map_columns(columns: Arc<[MySQLColumn]>) -> Vec<Column> {
-    columns
-        .as_ref()
-        .iter()
-        .map(|column| Column::new(column.name_str(), map_column_type(column.column_type())))
-        .collect()
-}
-
-fn map_column_type(column_type: ColumnType) -> TypeHint {
-    match column_type {
-        ColumnType::MYSQL_TYPE_STRING
-        | ColumnType::MYSQL_TYPE_VAR_STRING
-        | ColumnType::MYSQL_TYPE_BLOB
-        | ColumnType::MYSQL_TYPE_TINY_BLOB
-        | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
-        | ColumnType::MYSQL_TYPE_LONG_BLOB
-        | ColumnType::MYSQL_TYPE_SET
-        | ColumnType::MYSQL_TYPE_ENUM
-        | ColumnType::MYSQL_TYPE_DECIMAL
-        | ColumnType::MYSQL_TYPE_VARCHAR
-        | ColumnType::MYSQL_TYPE_BIT
-        | ColumnType::MYSQL_TYPE_NEWDECIMAL
-        | ColumnType::MYSQL_TYPE_GEOMETRY
-        | ColumnType::MYSQL_TYPE_JSON => TypeHint::Bytes,
-        ColumnType::MYSQL_TYPE_TINY => TypeHint::Int,
-        ColumnType::MYSQL_TYPE_SHORT | ColumnType::MYSQL_TYPE_YEAR => TypeHint::Int,
-        ColumnType::MYSQL_TYPE_LONG | ColumnType::MYSQL_TYPE_INT24 => TypeHint::Int,
-        ColumnType::MYSQL_TYPE_LONGLONG => TypeHint::Int,
-        ColumnType::MYSQL_TYPE_FLOAT => TypeHint::Float,
-        ColumnType::MYSQL_TYPE_DOUBLE => TypeHint::Double,
-        ColumnType::MYSQL_TYPE_TIMESTAMP
-        | ColumnType::MYSQL_TYPE_DATE
-        | ColumnType::MYSQL_TYPE_DATETIME => TypeHint::DateTime,
-        ColumnType::MYSQL_TYPE_TIME => TypeHint::DateInterval,
-        ColumnType::MYSQL_TYPE_NULL => TypeHint::Null,
-        _ => TypeHint::Bytes,
-    }
-}
-
-impl Into<MySQLValue> for Value {
-    fn into(self) -> MySQLValue {
-        match self {
-            Value::Int(value) => MySQLValue::from(value),
-            Value::UnsignedInt(value) => MySQLValue::from(value),
-            Value::Float(value) => MySQLValue::from(value),
-            Value::Double(value) => MySQLValue::from(value),
-            Value::DateTime {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                millisecond,
-            } => MySQLValue::Date(year, month, day, hour, minute, second, millisecond),
-            Value::DateInterval {
-                negative,
-                day,
-                hour,
-                minute,
-                second,
-                millisecond,
-            } => MySQLValue::Time(negative, day, hour, minute, second, millisecond),
-            Value::Bytes(value) => MySQLValue::from(value),
-            Value::Null => MySQLValue::NULL,
-        }
-    }
-}
-
-impl Into<Value> for MySQLValue {
-    fn into(self) -> Value {
-        match self {
-            MySQLValue::Int(value) => Value::int(value),
-            MySQLValue::UInt(value) => Value::uint(value),
-            MySQLValue::Bytes(value) => Value::bytes(value),
-            MySQLValue::Double(value) => Value::double(value),
-            MySQLValue::Float(value) => Value::float(value),
-            MySQLValue::Date(year, month, day, hour, minute, second, millisecond) => {
-                Value::datetime(year, month, day, hour, minute, second, millisecond)
-            }
-            MySQLValue::Time(negative, day, hour, minute, second, millisecond) => {
-                Value::date_interval(negative, day, hour, minute, second, millisecond)
-            }
-            MySQLValue::NULL => Value::null(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod value_to_mysql_value_mapper_tests {
-    use super::*;
-
-    #[test]
-    fn it_maps_null_value_to_null_value() {
-        assert_eq!(
-            map_values_to_mysql_values(vec![Value::Null]),
-            vec![MySQLValue::NULL]
-        )
-    }
-
-    #[test]
-    fn it_maps_integer_values_to_mysql_values() {
-        assert_eq!(
-            map_values_to_mysql_values(vec![Value::Int(123), Value::UnsignedInt(200)]),
-            vec![MySQLValue::Int(123), MySQLValue::UInt(200)]
-        )
-    }
-
-    #[test]
-    fn it_maps_float_values_to_mysql_values() {
-        assert_eq!(
-            map_values_to_mysql_values(vec![Value::Float(1234.0), Value::Double(1212.0)]),
-            vec![MySQLValue::Float(1234.0), MySQLValue::Double(1212.0)]
-        )
-    }
-
-    #[test]
-    fn it_maps_time_values_to_mysql_values() {
-        assert_eq!(
-            map_values_to_mysql_values(vec![
-                Value::date_interval(true, 1, 2, 12, 123, 1450),
-                Value::datetime(2010, 10, 1, 12, 23, 05, 1)
-            ]),
-            vec![
-                MySQLValue::Time(true, 1, 2, 12, 123, 1450),
-                MySQLValue::Date(2010, 10, 1, 12, 23, 05, 1)
-            ]
-        )
-    }
-
-    #[test]
-    fn it_maps_bytes_values_to_mysql_bytes() {
-        assert_eq!(
-            map_values_to_mysql_values(vec![
-                Value::bytes(b"value1".to_vec()),
-                Value::bytes(b"value2".to_vec()),
-                Value::bytes(b"value3".to_vec()),
-            ]),
-            vec![
-                MySQLValue::Bytes(b"value1".to_vec()),
-                MySQLValue::Bytes(b"value2".to_vec()),
-                MySQLValue::Bytes(b"value3".to_vec())
-            ]
-        )
-    }
-}
-
-#[cfg(test)]
-mod mysql_value_into_value_mapper_tests {
-    use super::*;
-
-    #[test]
-    fn it_maps_null_value_to_null_value() {
-        assert_eq!(
-            map_mysql_values_to_values(vec![MySQLValue::NULL]),
-            vec![Value::Null]
-        )
-    }
-
-    #[test]
-    fn it_maps_integer_values_to_mysql_values() {
-        assert_eq!(
-            map_mysql_values_to_values(vec![MySQLValue::Int(123), MySQLValue::UInt(200)]),
-            vec![Value::Int(123), Value::UnsignedInt(200)]
-        )
-    }
-
-    #[test]
-    fn it_maps_float_values_to_mysql_values() {
-        assert_eq!(
-            map_mysql_values_to_values(vec![MySQLValue::Float(1234.0), MySQLValue::Double(1212.0)]),
-            vec![Value::Float(1234.0), Value::Double(1212.0)]
-        )
-    }
-
-    #[test]
-    fn it_maps_time_values_to_mysql_values() {
-        assert_eq!(
-            map_mysql_values_to_values(vec![
-                MySQLValue::Time(true, 1, 2, 12, 123, 1450),
-                MySQLValue::Date(2010, 10, 1, 12, 23, 05, 1)
-            ]),
-            vec![
-                Value::date_interval(true, 1, 2, 12, 123, 1450),
-                Value::datetime(2010, 10, 1, 12, 23, 05, 1)
-            ]
-        )
-    }
-
-    #[test]
-    fn it_maps_bytes_values_to_mysql_bytes() {
-        assert_eq!(
-            map_mysql_values_to_values(vec![
-                MySQLValue::Bytes(b"value1".to_vec()),
-                MySQLValue::Bytes(b"value2".to_vec()),
-                MySQLValue::Bytes(b"value3".to_vec())
-            ]),
-            vec![
-                Value::bytes(b"value1".to_vec()),
-                Value::bytes(b"value2".to_vec()),
-                Value::bytes(b"value3".to_vec()),
-            ]
-        )
-    }
-}
-
-#[cfg(test)]
-mod error_mapper_tests {
-    use super::*;
-    use crate::lib::messages::ErrorType;
-    use mysql_async::{DriverError, IoError, ServerError, UrlError};
-    use std::io;
-
-    #[test]
-    fn it_does_export_server_error() {
-        assert_eq!(
-            map_error(MySQLError::Server(ServerError {
-                code: 99,
-                message: "Some error".into(),
-                state: "some state data".into()
-            })),
-            Event::error("ERROR some state data (99): Some error", ErrorType::Server)
-        );
-    }
-
-    #[test]
-    fn it_does_export_io_simple_error() {
-        assert_eq!(
-            map_error(MySQLError::Io(IoError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "Some error"
-            )))),
-            Event::error("Some error", ErrorType::Io)
-        )
-    }
-
-    #[test]
-    fn it_does_export_other_error_type() {
-        assert_eq!(
-            map_error(MySQLError::Other("Some value".into())),
-            Event::error("Some value", ErrorType::Other)
-        )
-    }
-
-    #[test]
-    fn it_does_export_driver_error() {
-        assert_eq!(
-            map_error(MySQLError::Driver(DriverError::ConnectionClosed)),
-            Event::error("Connection to the server is closed.", ErrorType::Driver)
-        )
-    }
-
-    #[test]
-    fn it_does_export_url_parsing_error() {
-        assert_eq!(
-            map_error(MySQLError::Url(UrlError::Invalid)),
-            Event::error("Invalid or incomplete connection URL", ErrorType::Url)
-        )
     }
 }
 
