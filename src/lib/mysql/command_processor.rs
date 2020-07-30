@@ -11,7 +11,7 @@ use crate::lib::messages::{Column, Command, ErrorType, Event, TypeHint, Value};
 use std::marker::PhantomData;
 
 const ERROR_CONNECTION_ESTABLISHED: &str =
-    "Connection is already established, close previously open connection to processed.";
+    "Connection is already established, close previously open connection to proceed.";
 
 pub(in crate::lib) struct MySQLConnection {
     inner: Conn,
