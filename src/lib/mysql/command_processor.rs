@@ -1,4 +1,7 @@
-use mysql_async::{prelude::*, BinaryProtocol, Conn, QueryResult, Row, Statement, TextProtocol};
+use mysql_async::{
+    prelude::*, BinaryProtocol, Conn, Error, NextItem, QueryResult, Result as MySQLErrorResult,
+    Statement, TextProtocol,
+};
 
 use std::collections::HashMap;
 
@@ -6,7 +9,7 @@ use super::errors::map_error;
 use super::value_mapper::map_columns;
 use super::value_mapper::map_mysql_values_to_values;
 use super::value_mapper::map_values_to_mysql_values;
-use crate::lib::messages::{Column, Command, ErrorType, Event, TypeHint, Value};
+use crate::lib::messages::{Command, ErrorType, Event, TypeHint, Value};
 
 use std::marker::PhantomData;
 
@@ -33,99 +36,98 @@ impl MySQLConnection {
     }
 
     async fn execute_query<T: AsRef<str>>(mut self, query: T) -> (Event, Self) {
-        let mut result = self.inner.query_iter(query.as_ref()).await.unwrap();
+        let query_result = process_query_result(self.inner.query_iter(query.as_ref()).await).await;
 
-        if result.is_empty() {
-            return (
-                Event::command(result.last_insert_id(), result.affected_rows()),
-                self,
-            );
-        }
+        let (event, current_result) = match query_result {
+            ProcessQueryResult::Event(event) => (event, None),
+            ProcessQueryResult::MySQLQueryResult(mut result) => (
+                result.process_result(&mut self.inner).await,
+                Some(MySQLResult::TextResult(result)),
+            ),
+        };
 
-        let row = result.next().await.unwrap().unwrap();
+        self.current_result = current_result;
 
-        let columns = row.columns();
-
-        let values = row.unwrap();
-
-        self.current_result = Some(MySQLResult::TextResult(MySQLQueryResult::new(
-            Event::result_row(map_mysql_values_to_values(values)),
-        )));
-
-        return (Event::result_set(map_columns(columns)), self);
+        (event, self)
     }
 
     async fn execute_statement(mut self, statement_id: u32, params: Vec<Value>) -> (Event, Self) {
-        let statement = self.statement_cache.get(&statement_id).unwrap();
+        let statement = match self.statement_cache.get(&statement_id) {
+            Some(statement) => statement,
+            None => {
+                return (
+                    Event::other_error(format!(
+                        "Statement with ID:{} does not exists",
+                        statement_id
+                    )),
+                    self,
+                )
+            }
+        };
 
-        let mut result = self
-            .inner
-            .exec_iter(statement, map_values_to_mysql_values(params))
-            .await
-            .unwrap();
+        let query_result = process_query_result(
+            self.inner
+                .exec_iter(statement, map_values_to_mysql_values(params))
+                .await,
+        )
+        .await;
 
-        if result.is_empty() {
-            return (
-                Event::command(result.last_insert_id(), result.affected_rows()),
-                self,
-            );
-        }
+        let (event, current_result) = match query_result {
+            ProcessQueryResult::Event(event) => (event, None),
+            ProcessQueryResult::MySQLQueryResult(mut result) => (
+                result.process_result(&mut self.inner).await,
+                Some(MySQLResult::BinaryResult(result)),
+            ),
+        };
 
-        let row = result.next().await.unwrap().unwrap();
+        self.current_result = current_result;
 
-        let columns = row.columns();
-
-        let values = row.unwrap();
-
-        self.current_result = Some(MySQLResult::BinaryResult(MySQLQueryResult::new(
-            Event::result_row(map_mysql_values_to_values(values)),
-        )));
-
-        return (Event::result_set(map_columns(columns)), self);
+        (event, self)
     }
 
     async fn fetch_result(mut self) -> (Event, Self) {
-        let mut result = self.current_result.take().unwrap();
-
-        if let Some(event) = result.take_next_event() {
-            self.current_result = Some(result);
-
-            return (event, self);
-        }
-
-        let row = result.fetch_row(&mut self.inner).await;
-
-        match row {
-            Some(row) => {
-                self.current_result = Some(result);
-                let row = row.unwrap();
-                (Event::result_row(map_mysql_values_to_values(row)), self)
-            }
+        let mut result = match self.current_result.take() {
+            Some(value) => value,
             None => {
-                if !result.is_fetched(&mut self.inner) {
-                    let row = result.fetch_next_result_set(&mut self.inner).await;
-
-                    let event = match row {
-                        Some(row) => {
-                            let columns = row.columns();
-
-                            result.put_next_event(Event::result_row(map_mysql_values_to_values(
-                                row.unwrap(),
-                            )));
-
-                            self.current_result = Some(result);
-
-                            Event::result_set(map_columns(columns))
-                        }
-                        None => Event::result_end(),
-                    };
-
-                    return (event, self);
-                }
-                (Event::result_end(), self)
+                return (
+                    Event::other_error("Result is fetched before query execution"),
+                    self,
+                )
             }
-        }
+        };
+
+        let event = result.process_result(&mut self.inner).await;
+
+        self.current_result = match &event {
+            Event::ResultRow(_) | Event::ResultSet(_) => Some(result),
+            _ => None,
+        };
+
+        (event, self)
     }
+}
+
+enum ProcessQueryResult<P: Protocol> {
+    Event(Event),
+    MySQLQueryResult(MySQLQueryResult<P>),
+}
+
+async fn process_query_result<P: Protocol>(
+    result: Result<QueryResult<'_, '_, P>, Error>,
+) -> ProcessQueryResult<P> {
+    let query_result = match result {
+        Ok(query_result) => query_result,
+        Err(error) => return ProcessQueryResult::Event(map_error(error)),
+    };
+
+    if query_result.is_empty() {
+        return ProcessQueryResult::Event(Event::command(
+            query_result.last_insert_id(),
+            query_result.affected_rows(),
+        ));
+    }
+
+    ProcessQueryResult::MySQLQueryResult(MySQLQueryResult::<P>::new())
 }
 
 pub(in crate::lib) enum MySQLResult {
@@ -134,47 +136,25 @@ pub(in crate::lib) enum MySQLResult {
 }
 
 impl MySQLResult {
-    async fn fetch_row(&mut self, connection: &mut Conn) -> Option<Row> {
+    async fn process_result(&mut self, connection: &mut Conn) -> Event {
         match self {
-            MySQLResult::BinaryResult(result) => result.fetch_row(connection).await,
-            MySQLResult::TextResult(result) => result.fetch_row(connection).await,
+            MySQLResult::BinaryResult(result) => result.process_result(connection).await,
+            MySQLResult::TextResult(result) => result.process_result(connection).await,
         }
     }
+}
 
-    async fn fetch_next_result_set(&mut self, connection: &mut Conn) -> Option<Row> {
-        match self {
-            MySQLResult::BinaryResult(result) => result.fetch_next_result_set(connection).await,
-            MySQLResult::TextResult(result) => result.fetch_next_result_set(connection).await,
-        }
-    }
-
-    fn take_next_event(&mut self) -> Option<Event> {
-        match self {
-            MySQLResult::BinaryResult(result) => result.next_event.take(),
-            MySQLResult::TextResult(result) => result.next_event.take(),
-        }
-    }
-
-    fn put_next_event(&mut self, event: Event) {
-        match self {
-            MySQLResult::BinaryResult(result) => result.next_event.replace(event),
-            MySQLResult::TextResult(result) => result.next_event.replace(event),
-        };
-    }
-
-    fn is_fetched(&self, connection: &mut Conn) -> bool {
-        match self {
-            MySQLResult::BinaryResult(result) => result.is_fetched(connection),
-            MySQLResult::TextResult(result) => result.is_fetched(connection),
-        }
-    }
+pub(in crate::lib) enum MySQLQueryResultState {
+    NotFetched,
+    WithEvent(Event),
+    Fetched,
 }
 
 pub(in crate::lib) struct MySQLQueryResult<Proto>
 where
     Proto: Protocol,
 {
-    next_event: Option<Event>,
+    state: MySQLQueryResultState,
     proto: PhantomData<Proto>,
 }
 
@@ -182,29 +162,77 @@ impl<'a, Proto> MySQLQueryResult<Proto>
 where
     Proto: Protocol,
 {
-    pub(crate) fn new(event: Event) -> Self {
+    pub(self) fn new() -> Self {
         Self {
-            next_event: Some(event),
+            state: MySQLQueryResultState::NotFetched,
             proto: PhantomData,
         }
     }
 
-    async fn fetch_row(&self, connection: &mut Conn) -> Option<Row> {
-        let mut query_result: QueryResult<'_, '_, Proto> = QueryResult::new(connection);
-
-        query_result.next().await.unwrap()
+    pub(self) fn fetched() -> Self {
+        Self {
+            state: MySQLQueryResultState::Fetched,
+            proto: PhantomData,
+        }
     }
 
-    async fn fetch_next_result_set(&self, connection: &mut Conn) -> Option<Row> {
-        let mut query_result: QueryResult<'_, '_, Proto> = QueryResult::new(connection);
+    async fn process_result(&mut self, connection: &mut Conn) -> Event {
+        let state = std::mem::replace(&mut self.state, MySQLQueryResultState::Fetched);
 
-        query_result.next().await.unwrap()
+        match state {
+            MySQLQueryResultState::WithEvent(event) => event,
+            MySQLQueryResultState::NotFetched | MySQLQueryResultState::Fetched => {
+                self.fetch_next_item(state, connection).await
+            }
+        }
     }
 
-    fn is_fetched(&self, connection: &mut Conn) -> bool {
-        let query_result: QueryResult<'_, '_, Proto> = QueryResult::new(connection);
+    async fn fetch_next_item(
+        &mut self,
+        state: MySQLQueryResultState,
+        connection: &mut Conn,
+    ) -> Event {
+        let mut query_result = QueryResult::<'_, '_, Proto>::new(connection);
 
-        query_result.is_empty()
+        let next_item = query_result.next_item().await;
+
+        match state {
+            MySQLQueryResultState::NotFetched => return self.fetch_result_set(next_item),
+            _ => (),
+        };
+
+        match next_item {
+            Ok(next_item) => match next_item {
+                NextItem::Row(row) => Event::result_row(map_mysql_values_to_values(row.unwrap())),
+                NextItem::EmptyResult(columns) => Event::result_set(map_columns(columns)),
+                NextItem::None => match query_result.is_empty() {
+                    true => Event::result_end(),
+                    false => self.fetch_result_set(query_result.next_item().await),
+                },
+            },
+            Err(error) => map_error(error),
+        }
+    }
+
+    fn fetch_result_set(&mut self, next_item: MySQLErrorResult<NextItem>) -> Event {
+        let next_item = match next_item {
+            Ok(item) => item,
+            Err(error) => return map_error(error),
+        };
+
+        match next_item {
+            NextItem::EmptyResult(columns) => Event::result_set(map_columns(columns)),
+            NextItem::Row(row) => {
+                let columns = row.columns();
+
+                self.state = MySQLQueryResultState::WithEvent(Event::result_row(
+                    map_mysql_values_to_values(row.unwrap()),
+                ));
+
+                Event::result_set(map_columns(columns))
+            }
+            NextItem::None => Event::result_end(),
+        }
     }
 }
 
@@ -312,6 +340,7 @@ async fn connect_to_mysql_server(url: String) -> (Event, ConnectionState) {
 #[cfg(test)]
 mod process_command_tests {
     use super::*;
+    use crate::lib::messages::Column;
 
     const SERVER_URL: &str = "mysql://root:tests@localhost/catalog";
 
@@ -705,6 +734,114 @@ mod process_command_tests {
         .0;
 
         assert!(matches!(event, Event::Command { affected_rows, ..} if affected_rows == 1))
+    }
+
+    #[tokio::test]
+    async fn it_executes_prepared_statement_with_multiple_result_sets_that_are_empty() {
+        let (statement_id, state) = prepare_statement("CALL all_product_data(?)", None).await;
+
+        let events = fetch_statement(statement_id, vec![Value::from("SKU100")], state).await;
+
+        assert_eq!(
+            events,
+            vec![
+                Event::result_set(vec![
+                    Column::new("sku", TypeHint::Bytes),
+                    Column::new("type", TypeHint::Bytes)
+                ]),
+                Event::result_set(vec![
+                    Column::new("sku", TypeHint::Bytes),
+                    Column::new("attribute_id", TypeHint::Int),
+                    Column::new("value", TypeHint::Int),
+                ]),
+                Event::result_set(vec![
+                    Column::new("sku", TypeHint::Bytes),
+                    Column::new("attribute_id", TypeHint::Int),
+                    Column::new("value", TypeHint::Bytes),
+                ]),
+                Event::result_set(vec![
+                    Column::new("sku", TypeHint::Bytes),
+                    Column::new("attribute_id", TypeHint::Int),
+                    Column::new("value", TypeHint::Bytes),
+                ]),
+                Event::result_set(vec![
+                    Column::new("sku", TypeHint::Bytes),
+                    Column::new("attribute_id", TypeHint::Int),
+                    Column::new("value", TypeHint::Bytes),
+                ]),
+                Event::result_end()
+            ]
+        )
+    }
+
+    #[tokio::test]
+    async fn it_processes_error_in_query_execution() {
+        let event =
+            match process_query_result::<BinaryProtocol>(Err(Error::Other("Test function".into())))
+                .await
+            {
+                ProcessQueryResult::Event(event) => event,
+                _ => unreachable!(),
+            };
+
+        assert_eq!(event, Event::other_error("Test function"));
+    }
+
+    #[tokio::test]
+    async fn it_errors_out_when_statement_does_not_exists() {
+        let (event, _) = process_command(
+            Command::execute(13, vec![]),
+            connect_to_database_and_get_state().await,
+        )
+        .await;
+
+        assert_eq!(
+            event,
+            Event::other_error("Statement with ID:13 does not exists")
+        )
+    }
+
+    #[tokio::test]
+    async fn it_errors_out_when_fetch_is_invoked_for_not_existing_result() {
+        let (event, _) =
+            process_command(Command::Fetch, connect_to_database_and_get_state().await).await;
+
+        assert_eq!(
+            event,
+            Event::other_error("Result is fetched before query execution")
+        )
+    }
+
+    #[tokio::test]
+    async fn it_handles_error_in_result_with_invalid_state() {
+        let mut connection = Conn::from_url(SERVER_URL).await.unwrap();
+
+        let _ = connection.query_iter("SELECT 1; SELECT11/;").await;
+
+        let event = MySQLQueryResult::<BinaryProtocol>::new()
+            .process_result(&mut connection)
+            .await;
+
+        assert_eq!(
+            event,
+            Event::error("failed to fill whole buffer", ErrorType::Io)
+        );
+    }
+
+    #[tokio::test]
+    async fn it_handles_error_in_result_with_invalid_state_after_fetch() {
+        let mut connection = Conn::from_url(SERVER_URL).await.unwrap();
+
+        let _ = connection.query_iter("SELECT 1; SELECT11/;").await;
+
+        let event = MySQLQueryResult::<BinaryProtocol>::fetched()
+            .process_result(&mut connection)
+            .await;
+
+        assert_eq!(
+            event,
+            Event::error("failed to fill whole buffer", ErrorType::Io)
+        );
     }
 
     async fn fetch_statement(

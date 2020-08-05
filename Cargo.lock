@@ -708,7 +708,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.24.0"
-source = "git+https://github.com/IvanChepurnyi/mysql_async.git?branch=patch-1#72daf7c09b17920f20919b9f5ae4e2bfe8fe29a8"
+source = "git+https://github.com/IvanChepurnyi/mysql_async.git?branch=next_item_feature#903af6ab12cbc8b51c4a8efcfdab57fc47d232a1"
 dependencies = [
  "bytes",
  "crossbeam",
