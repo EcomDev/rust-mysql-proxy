@@ -15,6 +15,9 @@ use std::marker::PhantomData;
 
 const ERROR_CONNECTION_ESTABLISHED: &str =
     "Connection is already established, close previously open connection to proceed.";
+const ERROR_CONNECTION_IS_NOT_ESTABLISHED: &str = "Execute connect to MySQL command first";
+const ERROR_RESULT_IS_FETCHED_BEFORE_QUERY_OR_STATEMENT: &str =
+    "Result is fetched before query execution";
 
 pub(in crate::lib) struct MySQLConnection {
     inner: Conn,
@@ -90,7 +93,7 @@ impl MySQLConnection {
             Some(value) => value,
             None => {
                 return (
-                    Event::other_error("Result is fetched before query execution"),
+                    Event::other_error(ERROR_RESULT_IS_FETCHED_BEFORE_QUERY_OR_STATEMENT),
                     self,
                 )
             }
@@ -266,8 +269,8 @@ pub(in crate::lib) async fn process_command(
     state: ConnectionState,
 ) -> (Event, ConnectionState) {
     match (command, state) {
-        (Command::Connect(url), ConnectionState::None) => connect_to_mysql_server(url).await,
-        (Command::Connect(url), ConnectionState::Closed) => connect_to_mysql_server(url).await,
+        (Command::Connect(url), ConnectionState::None)
+        | (Command::Connect(url), ConnectionState::Closed) => connect_to_mysql_server(url).await,
         (Command::Connect(_), state) => (Event::other_error(ERROR_CONNECTION_ESTABLISHED), state),
         (Command::Prepare(query), ConnectionState::Connected(connection)) => {
             prepare_statement(query, connection).await
@@ -279,7 +282,24 @@ pub(in crate::lib) async fn process_command(
         (Command::Query(query), ConnectionState::Connected(connection)) => {
             execute_query(query, connection).await
         }
-        _ => unimplemented!(),
+        (Command::Close, ConnectionState::Connected(connection)) => {
+            close_connection(connection).await
+        }
+        (_, ConnectionState::None) => (
+            Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED),
+            ConnectionState::None,
+        ),
+        (_, ConnectionState::Closed) => (
+            Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED),
+            ConnectionState::None,
+        ),
+    }
+}
+
+async fn close_connection(connection: MySQLConnection) -> (Event, ConnectionState) {
+    match connection.inner.disconnect().await {
+        Ok(_) => (Event::closed(), ConnectionState::Closed),
+        Err(error) => (map_error(error), ConnectionState::Closed),
     }
 }
 
@@ -808,7 +828,7 @@ mod process_command_tests {
 
         assert_eq!(
             event,
-            Event::other_error("Result is fetched before query execution")
+            Event::other_error(ERROR_RESULT_IS_FETCHED_BEFORE_QUERY_OR_STATEMENT)
         )
     }
 
@@ -842,6 +862,60 @@ mod process_command_tests {
             event,
             Event::error("failed to fill whole buffer", ErrorType::Io)
         );
+    }
+
+    #[tokio::test]
+    async fn it_processes_close_command() {
+        let (event, _) =
+            process_command(Command::close(), connect_to_database_and_get_state().await).await;
+
+        assert_eq!(event, Event::closed());
+    }
+
+    #[tokio::test]
+    async fn it_modifies_connection_state_to_closed_on_close() {
+        let (_, state) =
+            process_command(Command::close(), connect_to_database_and_get_state().await).await;
+
+        assert!(matches!(state, ConnectionState::Closed));
+    }
+
+    #[tokio::test]
+    async fn it_errors_out_when_non_connected_state_requires_command() {
+        let commands = vec![
+            Command::query("SELECT 1"),
+            Command::prepare("SELECT ?"),
+            Command::execute(123, vec![]),
+            Command::fetch(),
+        ];
+
+        let mut events = vec![];
+        let mut index = 0;
+        for command in commands {
+            events.push(
+                process_command(
+                    command,
+                    if index % 2 == 0 {
+                        ConnectionState::None
+                    } else {
+                        ConnectionState::Closed
+                    },
+                )
+                .await
+                .0,
+            );
+            index += 1;
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED),
+                Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED),
+                Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED),
+                Event::other_error(ERROR_CONNECTION_IS_NOT_ESTABLISHED)
+            ]
+        )
     }
 
     async fn fetch_statement(
